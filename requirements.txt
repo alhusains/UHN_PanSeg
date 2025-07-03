@@ -1,0 +1,7 @@
+nnunetv2
+torch
+torchvision
+nibabel
+scikit-learn
+pandas
+matplotlib
