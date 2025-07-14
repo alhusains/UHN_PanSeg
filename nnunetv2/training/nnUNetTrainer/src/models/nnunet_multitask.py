@@ -1,20 +1,90 @@
 import torch
 import torch.nn as nn
 from dynamic_network_architectures.architectures.unet import ResidualEncoderUNet
+from nnunetv2.utilities.network_initialization import InitWeights_He
 
-class nnUNetv2MultiTask(ResidualEncoderUNet):
-    """Multi-task nnU-Net v2 model for segmentation and classification."""
-    
+#classification head
+class ClassificationHead(nn.Module):
+    def __init__(self, encoder_channels, num_classes=3, hidden_dim=256, dropout_p=0.3):
+        super().__init__()
+        
+        #validate input
+        if len(encoder_channels) < 3:
+            raise ValueError("Encoder must have at least 3 feature maps")
+        
+        #take the last 3 feature maps
+        selected_channels = encoder_channels[-3:]
+        
+        #Feature compression (adapts to actual channel dims)
+        self.feature_adapters = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv3d(ch, 64, kernel_size=1, bias=False),
+                nn.BatchNorm3d(64),
+                nn.GELU(),
+                nn.AdaptiveAvgPool3d((4, 4, 4))
+            ) for ch in selected_channels
+        ])
+        
+        #enhanced fusion
+        self.fusion = nn.Sequential(
+            nn.Conv3d(64 * 3, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm3d(hidden_dim),
+            nn.GELU(),
+            nn.AdaptiveAvgPool3d(1)
+        )
+        
+        #classifier
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.BatchNorm1d(hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(p=dropout_p),
+            nn.Linear(hidden_dim // 2, num_classes)
+        )
+        
+        #initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.BatchNorm3d, nn.LayerNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, encoder_features):
+        #input validation
+        if len(encoder_features) < 3:
+            raise ValueError(f"Expected ≥3 feature maps, got {len(encoder_features)}")
+        
+        #process last 3 features
+        adapted = []
+        for i, adapter in enumerate(self.feature_adapters):
+            feat = encoder_features[-(3 - i)]  # Get features from last to -3
+            adapted.append(adapter(feat))
+        
+        #concatenate and fuse
+        x = torch.cat(adapted, dim=1)
+        x = self.fusion(x).flatten(1)
+        
+        return self.classifier(x)
+
+class nnUNetv2MultiTask(ResidualEncoderUNet):    
     def __init__(self, input_channels, n_stages, features_per_stage, conv_op, kernel_sizes, strides,
                  n_conv_per_stage, n_conv_per_stage_decoder, conv_bias, norm_op, norm_op_kwargs,
                  dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs, deep_supervision, num_classes,
                  num_classes_cls=3, **kwargs):
         
         # Map nnU-Net parameter names to ResidualEncoderUNet parameter names
-        # n_conv_per_stage -> n_blocks_per_stage
         n_blocks_per_stage = n_conv_per_stage
         
-        # Initialize the parent ResidualEncoderUNet
+        #initialize the parent ResidualEncoderUNet
         super().__init__(
             input_channels=input_channels,
             n_stages=n_stages,
@@ -22,7 +92,7 @@ class nnUNetv2MultiTask(ResidualEncoderUNet):
             conv_op=conv_op,
             kernel_sizes=kernel_sizes,
             strides=strides,
-            n_blocks_per_stage=n_blocks_per_stage,  # Mapped from n_conv_per_stage
+            n_blocks_per_stage=n_blocks_per_stage,
             num_classes=num_classes,
             n_conv_per_stage_decoder=n_conv_per_stage_decoder,
             conv_bias=conv_bias,
@@ -37,127 +107,29 @@ class nnUNetv2MultiTask(ResidualEncoderUNet):
         
         self.num_classes_cls = num_classes_cls
         
-        # Get encoder features from the bottleneck (last encoder stage)
-        encoder_features = features_per_stage[-1]
-        
-        # Enhanced classification head with proper normalization
-        self.global_avg_pool = nn.AdaptiveAvgPool3d(1)
-        self.global_max_pool = nn.AdaptiveMaxPool3d(1)
-        
-        # Classification head with batch normalization and proper regularization
-        self.classification_head = nn.Sequential(
-            # Feature normalization layer
-            nn.BatchNorm1d(encoder_features * 2),  # *2 for avg + max pooling
-            nn.Dropout(0.3),
-            nn.Linear(encoder_features * 2, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(256, num_classes_cls)
+        #use classification head
+        encoder_output_channels = self.encoder.output_channels
+        self.ClassificationHead = ClassificationHead(
+            encoder_output_channels,
+            num_classes=num_classes_cls
         )
         
-        # Store for classification output access
-        self.last_classification_output = None
-        self._bottleneck_features = None
+        #initialize classification head
+        self.ClassificationHead.apply(InitWeights_He(1e-2))
         
-        # Register a more reliable hook on the encoder
-        self._register_encoder_hook()
-        
-        print(f"Multi-task ResidualEncoderUNet initialized with {encoder_features} encoder features")
-        print("Using improved hook-based feature extraction for robust classification")
-    
-    def _register_encoder_hook(self):
-        """Register a robust hook on the encoder to capture bottleneck features."""
-        def encoder_hook(module, input, output):
-            # Store the bottleneck features for classification
-            self._bottleneck_features = output
-        
-        # Register hook on the last encoder stage
-        if hasattr(self.encoder, 'stages') and len(self.encoder.stages) > 0:
-            last_encoder_stage = self.encoder.stages[-1]
-            self._hook_handle = last_encoder_stage.register_forward_hook(encoder_hook)
-            print(f"Registered improved hook on encoder bottleneck: {type(last_encoder_stage)}")
-        else:
-            print("Warning: Could not find encoder stages for hook registration")
-            self._hook_handle = None
+        print(f"Multi-task ResidualEncoderUNet initialized with encoder channels: {encoder_output_channels}")
     
     def forward(self, x):
-        """Forward pass using parent's method with improved feature capture."""
-        # Clear previous features
-        self._bottleneck_features = None
-        
-        # Use parent's forward method for segmentation (maintains proper channel flow)
+        #get segmentation output from parent
         seg_output = super().forward(x)
         
-        # Process classification if we captured features
-        if self._bottleneck_features is not None:
-            # Apply proper feature normalization and pooling
-            avg_pooled = self.global_avg_pool(self._bottleneck_features)
-            max_pooled = self.global_max_pool(self._bottleneck_features)
-            
-            # Flatten and concatenate
-            avg_pooled = avg_pooled.view(avg_pooled.size(0), -1)
-            max_pooled = max_pooled.view(max_pooled.size(0), -1)
-            
-            # L2 normalize features to prevent scale issues
-            avg_pooled = nn.functional.normalize(avg_pooled, p=2, dim=1)
-            max_pooled = nn.functional.normalize(max_pooled, p=2, dim=1)
-            
-            pooled_features = torch.cat([avg_pooled, max_pooled], dim=1)
-            
-            # Classification prediction
-            cls_output = self.classification_head(pooled_features)
-            
-            # Store classification output for trainer access
-            self.last_classification_output = cls_output
-        else:
-            # Fallback: create dummy classification output
-            batch_size = x.size(0)
-            self.last_classification_output = torch.zeros(batch_size, self.num_classes_cls, device=x.device)
-            print("Warning: No bottleneck features captured, using dummy classification output")
+        #get encoder features directly
+        enc_features = self.encoder(x)
         
-        # Return segmentation output in the format nnU-Net expects
-        return seg_output
-    
-    def forward_segmentation_only(self, x):
-        """Forward pass for segmentation only using parent's method."""
-        return super().forward(x)
-    
-    def forward_classification_only(self, x):
-        """Forward pass for classification only."""
-        # Run encoder only to get features
-        self._bottleneck_features = None
+        #get classification output using all encoder features
+        class_logits = self.ClassificationHead(enc_features)
         
-        # Run through encoder stages to capture bottleneck features
-        current = x
-        for encoder_stage in self.encoder.stages:
-            current = encoder_stage(current)
+        #store for trainer access
+        self.last_classification_output = class_logits
         
-        # Use the final encoder output as bottleneck features
-        self._bottleneck_features = current
-        
-        # Process features for classification
-        if self._bottleneck_features is not None:
-            avg_pooled = self.global_avg_pool(self._bottleneck_features)
-            max_pooled = self.global_max_pool(self._bottleneck_features)
-            
-            avg_pooled = avg_pooled.view(avg_pooled.size(0), -1)
-            max_pooled = max_pooled.view(max_pooled.size(0), -1)
-            
-            # L2 normalize features
-            avg_pooled = nn.functional.normalize(avg_pooled, p=2, dim=1)
-            max_pooled = nn.functional.normalize(max_pooled, p=2, dim=1)
-            
-            pooled_features = torch.cat([avg_pooled, max_pooled], dim=1)
-            return self.classification_head(pooled_features)
-        else:
-            raise ValueError("No bottleneck features captured for classification")
-    
-    def __del__(self):
-        """Clean up hook when object is destroyed."""
-        if hasattr(self, '_hook_handle') and self._hook_handle is not None:
-            self._hook_handle.remove() 
+        return seg_output 
