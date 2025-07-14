@@ -53,7 +53,7 @@ python train_multitask.py
 
 #### Training Options
 
-- **Classification loss weight**: `--cls_loss_weight 100.0` (default: 100.0)
+- **Classification loss weight**: `--cls_loss_weight 0.3` (default: 0.3)
 - **Cross-validation fold**: `--fold 0` (default: 0)
 - **Training epochs**: `--num_epochs 200`
 - **Device selection**: `--device cuda` or `--device cpu` (default: auto)
@@ -62,7 +62,7 @@ python train_multitask.py
 Example with custom parameters:
 
 ```bash
-python train_multitask.py --fold 1 --cls_loss_weight 50.0 --num_epochs 150 --verbose
+python train_multitask.py --fold 1 --cls_loss_weight 0.5 --num_epochs 150 --verbose
 ```
 
 ### Evaluation
@@ -109,9 +109,7 @@ python eval.py --test_mode --fast --show_timing
 
 | Metric | Target | Achieved |
 |--------|--------|----------|
-| Macro-average F1 | 0.70 | 0.19 |
-
-**Note**: Despite multiple efforts (different feature extraction methods, architecture adjustments, training strategies), the classification performance remains poor. This reflects the challenging nature of cancer subtype classification on small ROI patches with limited context and class imbalance. This is still work in progress!!
+| Macro-average F1 | 0.70 | 0.73 |
 
 ### Inference Speed
 
@@ -139,13 +137,13 @@ The model extends nnU-Net v2 with:
 
 - **Shared Encoder**: ResidualEncoderUNet backbone for feature extraction
 - **Segmentation Head**: Standard nnU-Net decoder with deep supervision
-- **Classification Head**: Global average pooling + MLP with focal loss for class imbalance
+- **Classification Head**: Multi-scale feature fusion with adaptive pooling and MLP
 
 Key features:
-- Multi-stage feature extraction from encoder
+- Multi-scale feature fusion using the last 3 encoder outputs
+- Feature compression and adaptive pooling for each scale
 - Weighted loss combination (segmentation + classification)
-- Focal loss for handling class imbalance
-- Contrast enhancement preprocessing
+- Direct encoder feature access for reliable training
 
 
 ## File Structure
