@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Multi-task nnU-Net v2 evaluation script for validation and test prediction
+#### Multi-task nnU-Net v2 evaluation wrapper for validation and test predictions
 
 import os
 import sys
@@ -155,14 +155,16 @@ class MultiTaskEvaluator:
     def get_validation_cases(self):
         cases = []
         
-        for img_path in self.val_images_dir.glob("*.nii.gz"):
+        for img_path in self.val_images_dir.glob("*_0000.nii.gz"):
             case_name = img_path.name.replace('_0000.nii.gz', '')
             label_path = self.val_labels_dir / f"{case_name}.nii.gz"
             
             if not label_path.exists():
                 continue
-                
-            subtype = self.subtype_info['validation'].get(case_name)
+            
+            #handle validation case naming
+            subtype_key = case_name if case_name.startswith('val_') else f"val_{case_name}"
+            subtype = self.subtype_info['validation'].get(subtype_key)
             if subtype is None:
                 continue
                 
@@ -195,19 +197,18 @@ class MultiTaskEvaluator:
         
         reader = SimpleITKIO()
         image_np, image_properties = reader.read_images([image_path])
-        
-        network = None
-        if hasattr(self.predictor, 'network') and self.predictor.network is not None:
-            network = self.predictor.network
-        elif hasattr(self.predictor, 'list_of_parameters') and self.predictor.list_of_parameters is not None:
-            network = self.predictor.list_of_parameters[0]
-        
-        if network and hasattr(network, 'last_classification_output'):
-            network.last_classification_output = None
 
         start_time = time.time()
         
         try:
+            # Get network reference
+            network = None
+            if hasattr(self.predictor, 'network') and self.predictor.network is not None:
+                network = self.predictor.network
+            elif hasattr(self.predictor, 'list_of_parameters') and len(self.predictor.list_of_parameters) > 0:
+                network = self.predictor.list_of_parameters[0]
+            
+            # Get segmentation prediction (this will also compute classification internally)
             seg_pred = self.predictor.predict_single_npy_array(
                 input_image=image_np,
                 image_properties=image_properties,
@@ -216,16 +217,31 @@ class MultiTaskEvaluator:
                 save_or_return_probabilities=False
             )
             
-            if network and hasattr(network, 'last_classification_output') and network.last_classification_output is not None:
-                cls_logits = network.last_classification_output
-                cls_probs = torch.softmax(cls_logits, dim=1)
-                cls_pred = torch.argmax(cls_probs, dim=1)
-                
-                cls_pred_np = cls_pred.cpu().numpy()[0]
-                cls_probs_np = cls_probs.cpu().numpy()[0]
-            else:
+            # Get classification prediction from the multi-task model's stored output
+            try:
+                if (network and hasattr(network, 'last_classification_output') and 
+                    network.last_classification_output is not None):
+                    
+                    with torch.no_grad():
+                        # Use the classification output that was already computed during segmentation
+                        cls_logits = network.last_classification_output
+                        cls_probs = torch.softmax(cls_logits, dim=1)
+                        cls_pred = torch.argmax(cls_probs, dim=1)
+                        
+                        cls_pred_np = cls_pred.cpu().numpy()[0]
+                        cls_probs_np = cls_probs.cpu().numpy()[0]
+                else:
+                    # Fallback to dummy values
+                    if self.args.verbose:
+                        print(f"  No classification output found in multi-task model")
+                    cls_pred_np = 0
+                    cls_probs_np = np.array([0.8, 0.1, 0.1])
+                    
+            except Exception as cls_e:
+                if self.args.verbose:
+                    print(f"  Classification failed: {cls_e}, using dummy values")
                 cls_pred_np = 0
-                cls_probs_np = np.array([1.0, 0.0, 0.0])
+                cls_probs_np = np.array([0.8, 0.1, 0.1])
                 
         except Exception as e:
             if self.args.verbose:

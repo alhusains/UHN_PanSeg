@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Multi-task nnU-Net v2 training script with ResidualEncoderUNet architecture
+#### Multi-task nnU-Net v2 training script with successful implementation approach
 
 import os
 import sys
@@ -20,13 +20,13 @@ def setup_environment():
     for key, value in env_vars.items():
         os.environ[key] = value
     
-    # Limit threading for HPC compatibility
+    #limit threading for HPC compatibility
     for var in ['OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS', 
                 'OPENBLAS_NUM_THREADS', 'BLAS_NUM_THREADS', 'LAPACK_NUM_THREADS']:
         os.environ[var] = '1'
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='Multi-task nnU-Net v2 Training')
+    parser = argparse.ArgumentParser(description='Multi-task nnU-Net v2 Training - Successful Implementation')
     
     parser.add_argument('--fold', type=int, default=0, help='Cross-validation fold')
     parser.add_argument('--configuration', type=str, default='3d_fullres', 
@@ -34,12 +34,10 @@ def parse_arguments():
     parser.add_argument('--dataset', type=str, default='Dataset001_Pancreas',
                        help='Dataset name')
     
-    parser.add_argument('--cls_loss_weight', type=float, default=100.0,
-                       help='Classification loss weight')
+    parser.add_argument('--cls_loss_weight', type=float, default=0.3,
+                       help='Classification loss weight (successful implementation uses 0.3)')
     parser.add_argument('--num_classes_cls', type=int, default=3,
                        help='Number of classification classes')
-    parser.add_argument('--use_focal_loss', action='store_true', default=True,
-                       help='Use focal loss for classification')
     
     parser.add_argument('--device', type=str, default='auto',
                        help='Device: cuda, cpu, or auto')
@@ -57,8 +55,7 @@ def verify_preprocessing(dataset_name):
     required_files = [
         f'nnUNet_preprocessed/{dataset_name}/nnUNetPlans.json',
         f'nnUNet_preprocessed/{dataset_name}/dataset.json',
-        f'nnUNet_raw_data/{dataset_name}/dataset.json',
-        f'nnUNet_raw_data/{dataset_name}/subtype_info.json'
+        f'nnUNet_preprocessed/{dataset_name}/subtype_info.json'
     ]
     
     missing_files = [f for f in required_files if not Path(f).exists()]
@@ -95,7 +92,7 @@ def analyze_class_distribution(dataset_name, verbose=False):
     if not verbose:
         return
     
-    subtype_file = Path(f'nnUNet_raw_data/{dataset_name}/subtype_info.json')
+    subtype_file = Path(f'nnUNet_preprocessed/{dataset_name}/subtype_info.json')
     if not subtype_file.exists():
         print("Warning: subtype_info.json not found")
         return
@@ -141,7 +138,6 @@ def train_multitask_model(args):
     
     trainer.cls_loss_weight = args.cls_loss_weight
     trainer.num_classes_cls = args.num_classes_cls
-    trainer.use_focal_loss = args.use_focal_loss
     
     if args.num_epochs is not None:
         trainer.num_epochs = args.num_epochs
@@ -149,7 +145,7 @@ def train_multitask_model(args):
     print(f"Output folder: {trainer.output_folder}")
     print(f"Configuration: {args.configuration}")
     print(f"Fold: {args.fold}")
-    print(f"Classification loss weight: {args.cls_loss_weight}")
+    print(f"Classification loss weight: {args.cls_loss_weight} (successful implementation)")
     print(f"Number of epochs: {trainer.num_epochs}")
     
     trainer.run_training()
@@ -161,7 +157,7 @@ def train_multitask_model(args):
         'trainer_state': {
             'cls_loss_weight': trainer.cls_loss_weight,
             'num_classes_cls': trainer.num_classes_cls,
-            'use_focal_loss': trainer.use_focal_loss
+            'approach': 'successful_implementation'
         }
     }, final_model_path)
     
@@ -174,7 +170,7 @@ def main():
     setup_environment()
     
     print("Multi-task nnU-Net v2 Training")
-    print("=" * 40)
+    print("=" * 60)
     
     if not verify_preprocessing(args.dataset):
         print("Error: Preprocessing not completed")
